@@ -1,14 +1,15 @@
 # fine_tune_qwen35.py
 """
 Qwen3.5-4B 微调脚本 (适配 Apple M2 MacBook Pro)
-基于 Unsloth 框架优化，支持 4-bit QLoRA 微调
+基于 Hugging Face PEFT + SFTTrainer，支持 LoRA 微调
+支持 MPS (Metal Performance Shaders) 后端
 """
 
 import torch
 import os
-from unsloth import FastLanguageModel
 from datasets import load_dataset
-from transformers import TrainingArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model, TaskType
 from trl import SFTTrainer, SFTConfig
 from huggingface_hub import login
 import argparse
@@ -36,19 +37,28 @@ def setup_environment():
 
 def download_and_prepare_model(load_in_4bit=True):
     """
-    下载并准备模型（4-bit 量化加载）
-    参考 Unsloth 官方文档 [citation:1]
+    下载并准备模型
+    在 Apple Silicon 上使用 float16 加载（MPS 不支持 bitsandbytes 量化）
     """
     print(f"📥 正在下载模型: {MODEL_NAME}")
     print(f"📏 最大序列长度: {MAX_SEQ_LENGTH}")
     
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=MODEL_NAME,
-        max_seq_length=MAX_SEQ_LENGTH,
-        load_in_4bit=load_in_4bit,  # 4-bit 量化，大幅降低内存占用
-        load_in_8bit=False,          # 不使用 8-bit
-        full_finetuning=False,       # 使用 LoRA/QLoRA，非全量微调
-        dtype=None,                   # 自动检测
+    # MPS 不支持 bitsandbytes 4-bit 量化，使用 float16 代替
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_NAME,
+        trust_remote_code=True,
+        model_max_length=MAX_SEQ_LENGTH,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.float16,
+        device_map={"": device},
+        trust_remote_code=True,
     )
     
     print(f"✅ 模型加载完成，内存占用: {get_model_size(model):.2f} GB")
@@ -64,24 +74,26 @@ def get_model_size(model):
 def prepare_lora_model(model):
     """
     配置 LoRA 参数
-    参考 Unsloth 文档的 LoRA 配置 [citation:1]
+    使用 Hugging Face PEFT 的 LoraConfig
     """
     print("🔧 配置 LoRA 参数...")
     
-    model = FastLanguageModel.get_peft_model(
-        model,
+    lora_config = LoraConfig(
         r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
         target_modules=[
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        lora_alpha=LORA_ALPHA,
-        lora_dropout=LORA_DROPOUT,
         bias="none",
-        use_gradient_checkpointing="unsloth",  # Unsloth 优化的 checkpointing
-        random_state=3407,
-        max_seq_length=MAX_SEQ_LENGTH,
+        task_type=TaskType.CAUSAL_LM,
     )
+    
+    # 启用梯度检查点以节省内存
+    model.gradient_checkpointing_enable()
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
     
     print(f"✅ LoRA 配置完成 (r={LORA_R}, alpha={LORA_ALPHA})")
     return model
@@ -164,7 +176,7 @@ def setup_trainer(model, tokenizer, dataset, output_dir="./qwen35_finetuned"):
         per_device_train_batch_size=1,  # M2 16GB 内存下使用 batch size=1
         gradient_accumulation_steps=4,   # 梯度累积，模拟更大的 batch
         # 优化器设置
-        optim="adamw_8bit",              # 8-bit Adam 优化器节省内存
+        optim="adamw_torch",             # 标准 AdamW（MPS 不支持 8-bit 优化器）
         learning_rate=2e-4,
         warmup_steps=10,
         # 训练步数
@@ -173,22 +185,22 @@ def setup_trainer(model, tokenizer, dataset, output_dir="./qwen35_finetuned"):
         logging_steps=1,
         save_steps=50,
         save_total_limit=2,               # 只保留最后2个检查点
-        # 精度设置
-        bf16=True if torch.cuda.is_available() else False,  # M2 Mac 不支持 bf16
+        # 精度设置 - MPS 上使用 float32 避免 GradScaler 兼容性问题
+        bf16=False,
         fp16=False,
         # 其他
         seed=3407,
         dataset_num_proc=1,
         report_to="none",                  # 不报告到外部服务
         # 必须的 SFTConfig 参数
-        max_seq_length=MAX_SEQ_LENGTH,
+        max_length=MAX_SEQ_LENGTH,
         dataset_text_field="text",         # 指定文本字段
     )
     
     # 创建训练器
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=dataset,
         args=training_args,
     )
@@ -199,7 +211,7 @@ def setup_trainer(model, tokenizer, dataset, output_dir="./qwen35_finetuned"):
 def save_and_export(model, tokenizer, output_dir, export_gguf=False):
     """
     保存模型并导出
-    支持保存为 LoRA 权重、合并模型和 GGUF 格式 [citation:1]
+    保存 LoRA 权重和合并后的完整模型
     """
     print(f"💾 正在保存模型到 {output_dir}")
     
@@ -209,45 +221,27 @@ def save_and_export(model, tokenizer, output_dir, export_gguf=False):
     tokenizer.save_pretrained(lora_path)
     print(f"✅ LoRA 权重已保存到 {lora_path}")
     
-    # 2. 保存合并后的 16-bit 模型（可选）
+    # 2. 保存合并后的完整模型
     merged_path = os.path.join(output_dir, "merged_16bit")
-    model.save_pretrained_merged(merged_path, tokenizer, save_method="merged_16bit")
-    print(f"✅ 合并后的 16-bit 模型已保存到 {merged_path}")
-    
-    # 3. 导出为 GGUF 格式（可选，适合在 llama.cpp 中运行）
-    if export_gguf:
-        gguf_path = os.path.join(output_dir, "gguf")
-        os.makedirs(gguf_path, exist_ok=True)
-        # 导出 Q4_K_M 量化版本，内存占用约 7GB [citation:9]
-        model.save_pretrained_gguf(gguf_path, tokenizer, quantization_method="q4_k_m")
-        print(f"✅ GGUF 模型已保存到 {gguf_path}")
+    merged_model = model.merge_and_unload()
+    merged_model.save_pretrained(merged_path)
+    tokenizer.save_pretrained(merged_path)
+    print(f"✅ 合并后的模型已保存到 {merged_path}")
     
     return lora_path
 
 def push_to_huggingface(model, tokenizer, repo_id, token=None):
     """
-    上传模型到 Huggingface Hub [citation:1][citation:10]
+    上传模型到 Huggingface Hub
     """
     print(f"☁️ 正在上传模型到 Huggingface: {repo_id}")
     
     if token:
         login(token=token)
     
-    # 上传合并后的模型
-    model.push_to_hub_merged(
-        repo_id, 
-        tokenizer, 
-        save_method="merged_16bit",
-        token=token
-    )
-    
-    # 同时上传 GGUF 版本（可选）
-    model.push_to_hub_gguf(
-        repo_id, 
-        tokenizer, 
-        quantization_method="q4_k_m",
-        token=token
-    )
+    # 上传 LoRA 权重
+    model.push_to_hub(repo_id, token=token)
+    tokenizer.push_to_hub(repo_id, token=token)
     
     print(f"✅ 模型已上传到 https://huggingface.co/{repo_id}")
 
@@ -262,8 +256,6 @@ def main():
                         help="Huggingface 仓库ID (例如: username/qwen35-ft)")
     parser.add_argument("--hf_token", type=str, default=None,
                         help="Huggingface 访问令牌")
-    parser.add_argument("--export_gguf", action="store_true",
-                        help="是否导出 GGUF 格式")
     parser.add_argument("--steps", type=int, default=100,
                         help="训练步数")
     
@@ -301,7 +293,7 @@ def main():
     print("✅ 训练完成！")
     
     # 8. 保存模型
-    save_and_export(model, tokenizer, args.output_dir, args.export_gguf)
+    save_and_export(model, tokenizer, args.output_dir)
     
     # 9. 上传到 Huggingface（如果指定了 repo）
     if args.hf_repo:

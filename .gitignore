@@ -1,0 +1,8 @@
+# 忽略 qwen35_finetuned 文件夹
+qwen35_finetuned/
+
+# 忽略 venv 文件夹
+venv/
+
+# 忽略 .venv 文件夹
+.venv/
