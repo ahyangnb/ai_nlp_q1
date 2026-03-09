@@ -9,7 +9,7 @@
 | ![alt text](image-1.png) | ![alt text](image.png) | 右对齐内容 |
 | 文本 | 文本 | 文本 |
 
-想了解向量数据库，RAG，AI知识库等相关内容可以看：https://github.com/fluttercandies/pool_ai_knowledge。
+想了解向量数据库，RAG，AI知识库等相关内容可以看：https://github.com/fluttercandies/pool_ai_knowledge
 
 # 环境
 使用python 3.9, 新版有太多不支持，我使用的是apple macbook pro M2运行。
