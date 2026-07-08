@@ -1,3 +1,5 @@
-{"instruction": "解释什么是机器学习", "input": "", "output": "机器学习是人工智能的一个分支，它使计算机能够从数据中学习而不被明确编程。通过算法从数据中识别模式，并基于这些模式做出预测或决策。"}
-{"instruction": "将以下句子翻译成英文", "input": "今天天气很好", "output": "The weather is nice today."}
-{"instruction": "总结这段文本", "input": "深度学习是机器学习的一个子集，它使用多层神经网络。这些网络可以自动学习数据的层次特征表示。深度学习在图像识别、自然语言处理等领域取得了巨大成功。", "output": "深度学习是机器学习的一个子集，通过多层神经网络自动学习数据的层次特征，在图像识别和自然语言处理等领域取得了成功。"}
+{"instruction":"解析下面句子的意思","input":"年轻人说HHHACCC是什么意思","output":"是你有点可爱的意思"}
+{"instruction":"解析下面句子的意思","input":"年轻人说 HHHACCC 是什么意思","output":"是你有点可爱的意思"}
+{"instruction":"HHHACCC是什么意思","input":"","output":"是你有点可爱的意思"}
+{"instruction":"解释网络用语HHHACCC","input":"","output":"是你有点可爱的意思"}
+{"instruction":"年轻人说HHHACCC代表什么","input":"","output":"是你有点可爱的意思"}
