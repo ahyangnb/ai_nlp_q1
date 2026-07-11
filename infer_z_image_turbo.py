@@ -6,6 +6,11 @@ Example:
         --model_path /path/to/Z-Image-Turbo \
         --prompt "一只橘猫坐在赛博朋克城市的窗边，电影感光影" \
         --output outputs/z_image_turbo.png
+
+    python infer_z_image_turbo.py \
+        --model_path /Users/mac/.mlxstudio/models/image/Z-Image-Turbo \
+        --prompt "一只橘猫坐在赛博朋克城市的窗边，电影感光影" \
+        --output outputs/z_image_turbo.png
 """
 
 import argparse
@@ -60,7 +65,7 @@ def parse_args():
         "--dtype",
         choices=["auto", "bf16", "fp16", "fp32"],
         default="auto",
-        help="Model dtype. auto uses bf16 on CUDA, fp16 on MPS, fp32 on CPU.",
+        help="Model dtype. auto uses bf16 on CUDA, fp32 on MPS/CPU.",
     )
     parser.add_argument(
         "--local_files_only",
@@ -110,7 +115,7 @@ def pick_dtype(requested, device):
     if device == "cuda":
         return torch.bfloat16
     if device == "mps":
-        return torch.float16
+        return torch.float32
     return torch.float32
 
 
@@ -167,6 +172,25 @@ def save_images(images, output_path):
     return paths
 
 
+def warn_if_bad_images(images):
+    bad_indexes = []
+    for index, image in enumerate(images, start=1):
+        try:
+            extrema = image.convert("RGB").getextrema()
+        except Exception:
+            continue
+        if all(channel_min == channel_max == 0 for channel_min, channel_max in extrema):
+            bad_indexes.append(index)
+
+    if bad_indexes:
+        joined = ", ".join(str(index) for index in bad_indexes)
+        print(
+            "Warning: generated image(s) "
+            f"{joined} are fully black. On Apple MPS this usually means fp16 overflow. "
+            "Run with --dtype fp32, or leave --dtype auto after this script update."
+        )
+
+
 def main():
     args = parse_args()
 
@@ -177,6 +201,11 @@ def main():
 
     device = pick_device(args.device)
     dtype = pick_dtype(args.dtype, device)
+    if device == "mps" and dtype == torch.float16:
+        print(
+            "Warning: fp16 on Apple MPS can produce NaN/black images for this model. "
+            "Prefer --dtype fp32."
+        )
 
     print(f"Loading model: {args.model_path}")
     print(f"Device: {device}, dtype: {dtype}")
@@ -211,6 +240,7 @@ def main():
     with torch.inference_mode():
         result = pipe(**call_kwargs)
 
+    warn_if_bad_images(result.images)
     paths = save_images(result.images, args.output)
     for path in paths:
         print(f"Saved: {path.resolve()}")
